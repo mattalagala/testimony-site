@@ -38,7 +38,7 @@ npm run test:db                                  # needs a SQL Server (see CI's 
 1. Format, lint, typecheck, unit tests, build, Bicep build.
 2. Migrations + SQL repository tests against a disposable SQL Server container.
 3. Playwright e2e against a local build with sample data.
-4. *(Azure enabled)* Bicep what-if, deploy a full web + API preview environment, Playwright e2e against it. The preview closes when the PR closes.
+4. *(Azure enabled)* Bicep what-if, create and migrate the PR's own database (`testimony-pr-<n>`, free offer), deploy a full web + API preview environment pointed at it, then run Playwright e2e. Closing the PR removes the preview and drops its database. Dependabot PRs skip this step.
 
 **Merge to main (`deploy.yml`, dev)**
 Bicep → open SQL firewall for the runner → migrate → seed samples (dev only) → ensure API DB user → close firewall → app settings → deploy → wait for `/api/health` → smoke test.

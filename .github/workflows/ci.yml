@@ -100,7 +100,8 @@ jobs:
       vars.AZURE_ENABLED == 'true' &&
       github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -111,6 +112,8 @@ jobs:
       RG: ${{ vars.AZURE_RG }}
       SQL_ADMIN_GROUP_ID: ${{ vars.SQL_ADMIN_GROUP_ID }}
       SQL_ADMIN_GROUP_NAME: ${{ vars.SQL_ADMIN_GROUP_NAME }}
+      # Each PR gets its own database (free offer), dropped when the PR closes.
+      PREVIEW_DB: testimony-pr-${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -161,7 +164,24 @@ jobs:
           fi
           token=$(az staticwebapp secrets list -n "$name" -g "$RG" --query properties.apiKey -o tsv)
           echo "::add-mask::$token"
-          { echo "exists=true"; echo "name=$name"; echo "token=$token"; } >> "$GITHUB_OUTPUT"
+          sql=$(az sql server list -g "$RG" --query "[0].name" -o tsv)
+          pw=$(az staticwebapp appsettings list -n "$name" -g "$RG" --query "properties.SQL_PASSWORD" -o tsv 2>/dev/null || true)
+          if [ -z "$sql" ] || [ -z "$pw" ] || [ "$pw" = "None" ]; then
+            echo "::error::Dev isn't fully provisioned (SQL server or API password missing). Re-run the Deploy (dev) workflow."; exit 1
+          fi
+          echo "::add-mask::$pw"
+          { echo "exists=true"; echo "name=$name"; echo "token=$token"; echo "sqlServer=$sql"; echo "password=$pw"; } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare preview database
+        if: steps.swa.outputs.exists == 'true'
+        env:
+          SQL_SERVER_NAME: ${{ steps.swa.outputs.sqlServer }}
+          SQL_DATABASE: ${{ env.PREVIEW_DB }}
+          APP_DB_PASSWORD: ${{ steps.swa.outputs.password }}
+          APP_ENVIRONMENT: preview
+          CREATE_IF_MISSING: 'true'
+        # Creates the DB on first run, then migrates with THIS PR's migrations and seeds samples.
+        run: .github/scripts/prepare-database.sh
 
       - name: Deploy preview
         id: deploy
@@ -176,17 +196,15 @@ jobs:
           skip_app_build: true
           skip_api_build: true
 
-      - name: Copy app settings to preview environment
+      - name: Point preview environment at its database
         if: steps.swa.outputs.exists == 'true'
         env:
           SWA: ${{ steps.swa.outputs.name }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           settings=$(az staticwebapp appsettings list -n "$SWA" -g "$RG" --query properties -o json)
-          mapfile -t pairs < <(echo "$settings" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
-          if [ ${#pairs[@]} -eq 0 ]; then
-            echo "::warning::Production environment has no app settings yet; preview API will be degraded."; exit 0
-          fi
+          mapfile -t pairs < <(echo "$settings" | jq -r --arg db "$PREVIEW_DB" \
+            '.SQL_DATABASE = $db | .APP_ENVIRONMENT = "preview" | to_entries[] | "\(.key)=\(.value)"')
           az staticwebapp appsettings set -n "$SWA" -g "$RG" --environment-name "$PR" \
             --setting-names "${pairs[@]}" --output none
 
@@ -222,7 +240,8 @@ jobs:
     if: >-
       vars.AZURE_ENABLED == 'true' &&
       github.event.action == 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -248,3 +267,15 @@ jobs:
           azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
           action: close
           app_location: web/dist
+      - name: Drop preview database
+        env:
+          RG: ${{ vars.AZURE_RG }}
+          DB: testimony-pr-${{ github.event.pull_request.number }}
+        run: |
+          sql=$(az sql server list -g "$RG" --query "[0].name" -o tsv)
+          if [ -n "$sql" ] && az sql db show -g "$RG" -s "$sql" -n "$DB" -o none 2>/dev/null; then
+            az sql db delete -g "$RG" -s "$sql" -n "$DB" --yes -o none
+            echo "Dropped $DB"
+          else
+            echo "No preview database $DB to drop."
+          fi

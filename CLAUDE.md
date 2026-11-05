@@ -41,6 +41,7 @@ Product decisions, scope, and open questions live in the **project brief** (clau
 | `e2e/` | Playwright tests tagged `@smoke`. They run locally, against PR previews, and after deploy, so assert structure, not specific stories. |
 
 - **Data access:** the API connects to Azure SQL as contained user `api_app` (`db_datareader` + `db_datawriter`). The password lives only in SWA app settings, set by the pipeline. Migrations run with an Entra token as a member of `sg-testimony-sql-admins-<env>`.
+- **PR previews** each get their own database, `testimony-pr-<number>`, on the dev SQL server (free offer, auto-pause). It's created and migrated with the PR's own migrations, seeded with samples, and dropped when the PR closes. Dependabot PRs skip previews. Preview data is throwaway: never point a preview at the dev database. `.github/scripts/prepare-database.sh` prepares any database, for deploys and previews alike.
 - **Secrets:** never commit them. Managed functions can't use Key Vault or managed identity, so the pipeline sets secrets as SWA app settings.
 
 ## Commands
