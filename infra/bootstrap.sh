@@ -72,6 +72,8 @@ gh variable set SQL_ADMIN_GROUP_NAME  --env "$ENV_NAME" --repo "$REPO" --body "$
 
 echo
 echo "SQL admin group members:"
-az ad group member list --group "$GRP_ID" --query "[].displayName" -o tsv | sed 's/^/  - /'
+# `az ad group member list` only shows users; ask Graph for all members (incl. the pipeline SP).
+az rest --method GET --url "https://graph.microsoft.com/v1.0/groups/$GRP_ID/members?\$select=displayName" \
+  --query "value[].displayName" -o tsv | sed 's/^/  - /'
 echo
 echo "Done. To switch on Azure jobs:  gh variable set AZURE_ENABLED --repo $REPO --body true"
