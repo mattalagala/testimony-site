@@ -120,6 +120,24 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Check Azure variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RG: ${{ vars.AZURE_RG }}
+          SQL_ADMIN_GROUP_ID: ${{ vars.SQL_ADMIN_GROUP_ID }}
+          SQL_ADMIN_GROUP_NAME: ${{ vars.SQL_ADMIN_GROUP_NAME }}
+        run: |
+          missing=()
+          for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RG SQL_ADMIN_GROUP_ID SQL_ADMIN_GROUP_NAME; do
+            [ -n "${!v}" ] || missing+=("$v")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing variables in GitHub environment 'dev': ${missing[*]}. Run ./infra/bootstrap.sh dev <subscription>."
+            exit 1
+          fi
+
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
