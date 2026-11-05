@@ -28,15 +28,23 @@ APP_ID=$(az ad app list --display-name "$APP_NAME" --query "[0].appId" -o tsv)
 [ -z "$APP_ID" ] && APP_ID=$(az ad app create --display-name "$APP_NAME" --query appId -o tsv)
 SP_OID=$(az ad sp show --id "$APP_ID" --query id -o tsv 2>/dev/null || az ad sp create --id "$APP_ID" --query id -o tsv)
 
-CRED_NAME=gh-env-$ENV_NAME
-if [ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?name=='$CRED_NAME'].name" -o tsv)" ]; then
-  az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
-    \"name\": \"$CRED_NAME\",
-    \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"repo:$REPO:environment:$ENV_NAME\",
-    \"audiences\": [\"api://AzureADTokenExchange\"]
-  }"
-fi
+# GitHub may send either subject format in the OIDC token: the classic name-based one,
+# or the newer ID-based one (owner@ownerId/repo@repoId). Register both.
+OWNER=${REPO%%/*}; NAME=${REPO#*/}
+OWNER_ID=$(gh api "users/$OWNER" --jq .id)
+REPO_ID=$(gh api "repos/$REPO" --jq .id)
+add_credential() { # name subject
+  if [ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?name=='$1'].name" -o tsv)" ]; then
+    az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
+      \"name\": \"$1\",
+      \"issuer\": \"https://token.actions.githubusercontent.com\",
+      \"subject\": \"$2\",
+      \"audiences\": [\"api://AzureADTokenExchange\"]
+    }"
+  fi
+}
+add_credential "gh-env-$ENV_NAME" "repo:$REPO:environment:$ENV_NAME"
+add_credential "gh-env-$ENV_NAME-ids" "repo:$OWNER@$OWNER_ID/$NAME@$REPO_ID:environment:$ENV_NAME"
 
 # Contributor only: the templates create no role assignments (SWA managed functions
 # can't use managed identity), so the pipeline doesn't need RBAC-admin rights.
