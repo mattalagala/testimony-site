@@ -1,0 +1,55 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ * Night → dawn: a deep ink-blue masthead that gives way to clean white reading
+ * space, with one warm "first light" amber reserved for the next step toward Jesus.
+ */
+@theme {
+  --color-night: #1c2a48; /* masthead, headings */
+  --color-night-soft: #2c3d63;
+  --color-ink: #20242e; /* body text */
+  --color-slate: #5a6273; /* secondary text */
+  --color-mist: #e9eef6; /* quiet surfaces, chips */
+  --color-line: #d8dfea; /* rules between stories */
+  --color-dawn: #f0b450; /* the one accent: next-step actions only */
+  --color-dawn-deep: #c98a1f; /* dawn on white, for text/borders (AA on white at large sizes) */
+  --color-paper: #ffffff;
+
+  --font-serif: 'Literata', Georgia, 'Times New Roman', serif;
+  --font-sans: 'Public Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@layer base {
+  html {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100dvh;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-dawn);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--color-dawn);
+    color: var(--color-night);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

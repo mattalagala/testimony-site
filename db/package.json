@@ -1,0 +1,28 @@
+{
+  "name": "@testimony/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "tsx src/cli.ts migrate",
+    "seed:samples": "tsx src/cli.ts seed-samples",
+    "ensure-app-user": "tsx src/cli.ts ensure-app-user",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test": "vitest run --exclude \"**/*.integration.test.ts\""
+  },
+  "dependencies": {
+    "@testimony/shared": "*",
+    "mssql": "^12.7.14"
+  },
+  "devDependencies": {
+    "@types/mssql": "^12.3.0",
+    "tsx": "^4.23.15",
+    "vitest": "^5.1.0"
+  },
+  "exports": {
+    "./migrate": "./src/migrate.ts",
+    "./seed": "./src/seed-samples.ts",
+    "./testing": "./src/testing.ts"
+  }
+}
