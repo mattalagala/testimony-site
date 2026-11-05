@@ -51,7 +51,7 @@ az login && gh auth login
 gh variable set AZURE_ENABLED --repo mattalagala/testimony-site --body true
 ```
 
-This creates the resource group, an Entra app registration with a GitHub OIDC federated credential (no secrets), RG-scoped RBAC, the SQL Entra admin group (you + the pipeline), and the GitHub `dev` environment variables. Everything else is deployed by the pipeline.
+This creates the resource group, an Entra app registration with a GitHub OIDC federated credential (no secrets), Contributor on the resource group only, the SQL Entra admin group (you + the pipeline), and the GitHub `dev` environment variables. Everything else is deployed by the pipeline.
 
 ## Data & privacy rules baked into the code
 

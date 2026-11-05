@@ -4,6 +4,7 @@
 #
 # Usage:  az login && gh auth login
 #         ./infra/bootstrap.sh dev "<subscription id or name>"
+# Safe to re-run: existing resources are reused.
 set -euo pipefail
 
 ENV_NAME=${1:?environment name (dev|prod)}
@@ -37,11 +38,11 @@ if [ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?name=='
   }"
 fi
 
-echo "Role assignments on $RG"
-for ROLE in "Contributor" "Role Based Access Control Administrator"; do
-  az role assignment create --assignee-object-id "$SP_OID" --assignee-principal-type ServicePrincipal \
-    --role "$ROLE" --scope "$RG_ID" -o none
-done
+# Contributor only: the templates create no role assignments (SWA managed functions
+# can't use managed identity), so the pipeline doesn't need RBAC-admin rights.
+echo "Contributor on $RG"
+az role assignment create --assignee-object-id "$SP_OID" --assignee-principal-type ServicePrincipal \
+  --role "Contributor" --scope "$RG_ID" -o none
 
 echo "SQL admin group $GROUP_NAME"
 GRP_ID=$(az ad group list --display-name "$GROUP_NAME" --query "[0].id" -o tsv)
@@ -61,5 +62,8 @@ gh variable set AZURE_RG              --env "$ENV_NAME" --repo "$REPO" --body "$
 gh variable set SQL_ADMIN_GROUP_ID    --env "$ENV_NAME" --repo "$REPO" --body "$GRP_ID"
 gh variable set SQL_ADMIN_GROUP_NAME  --env "$ENV_NAME" --repo "$REPO" --body "$GROUP_NAME"
 
+echo
+echo "SQL admin group members:"
+az ad group member list --group "$GRP_ID" --query "[].displayName" -o tsv | sed 's/^/  - /'
 echo
 echo "Done. To switch on Azure jobs:  gh variable set AZURE_ENABLED --repo $REPO --body true"
