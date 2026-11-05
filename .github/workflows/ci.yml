@@ -1,0 +1,250 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  verify:
+    name: Lint, typecheck, unit tests, build
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Bicep build
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          SQL_ADMIN_GROUP_ID=00000000-0000-0000-0000-000000000000 SQL_ADMIN_GROUP_NAME=placeholder \
+            az bicep build-params --file infra/dev.bicepparam --stdout > /dev/null
+
+  db-integration:
+    name: DB migrations + repository tests (SQL Server container)
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: Ci-Only-Passw0rd!
+        ports: ['1433:1433']
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Ci-Only-Passw0rd!' -Q 'SELECT 1' -b"
+          --health-interval 10s --health-timeout 5s --health-retries 12 --health-start-period 20s
+    env:
+      SQL_SERVER: localhost
+      SQL_DATABASE: master
+      SQL_USER: sa
+      SQL_PASSWORD: Ci-Only-Passw0rd!
+      SQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration -w db
+      - run: npm run test:integration -w api
+
+  e2e-local:
+    name: E2E (local stack, sample data)
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build -w web
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-local
+          path: playwright-report
+          retention-days: 7
+
+  # ---- Azure (switched on by repo variable AZURE_ENABLED=true) ----
+
+  preview:
+    name: Preview environment + E2E
+    needs: [verify]
+    if: >-
+      vars.AZURE_ENABLED == 'true' &&
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      RG: ${{ vars.AZURE_RG }}
+      SQL_ADMIN_GROUP_ID: ${{ vars.SQL_ADMIN_GROUP_ID }}
+      SQL_ADMIN_GROUP_NAME: ${{ vars.SQL_ADMIN_GROUP_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Check Azure variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RG: ${{ vars.AZURE_RG }}
+          SQL_ADMIN_GROUP_ID: ${{ vars.SQL_ADMIN_GROUP_ID }}
+          SQL_ADMIN_GROUP_NAME: ${{ vars.SQL_ADMIN_GROUP_NAME }}
+        run: |
+          missing=()
+          for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RG SQL_ADMIN_GROUP_ID SQL_ADMIN_GROUP_NAME; do
+            [ -n "${!v}" ] || missing+=("$v")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing variables in GitHub environment 'dev': ${missing[*]}. Run ./infra/bootstrap.sh dev <subscription>."
+            exit 1
+          fi
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bicep what-if
+        run: |
+          az deployment group what-if -g "$RG" \
+            --template-file infra/main.bicep --parameters infra/dev.bicepparam \
+            --result-format ResourceIdOnly | tee what-if.txt
+          { echo '### Bicep what-if (dev)'; echo '```'; cat what-if.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Find Static Web App
+        id: swa
+        run: |
+          name=$(az staticwebapp list -g "$RG" --query "[0].name" -o tsv)
+          if [ -z "$name" ]; then
+            echo "::notice::No Static Web App in $RG yet. Merge to main once to provision dev; previews start after that."
+            echo "exists=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          token=$(az staticwebapp secrets list -n "$name" -g "$RG" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          { echo "exists=true"; echo "name=$name"; echo "token=$token"; } >> "$GITHUB_OUTPUT"
+
+      - name: Deploy preview
+        id: deploy
+        if: steps.swa.outputs.exists == 'true'
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          repo_token: ${{ github.token }}
+          action: upload
+          app_location: web/dist
+          api_location: api/.deploy
+          skip_app_build: true
+          skip_api_build: true
+
+      - name: Copy app settings to preview environment
+        if: steps.swa.outputs.exists == 'true'
+        env:
+          SWA: ${{ steps.swa.outputs.name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          settings=$(az staticwebapp appsettings list -n "$SWA" -g "$RG" --query properties -o json)
+          mapfile -t pairs < <(echo "$settings" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+          if [ ${#pairs[@]} -eq 0 ]; then
+            echo "::warning::Production environment has no app settings yet; preview API will be degraded."; exit 0
+          fi
+          az staticwebapp appsettings set -n "$SWA" -g "$RG" --environment-name "$PR" \
+            --setting-names "${pairs[@]}" --output none
+
+      - name: Wait for preview API (serverless DB may be resuming)
+        if: steps.swa.outputs.exists == 'true'
+        env:
+          URL: ${{ steps.deploy.outputs.static_web_app_url }}
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/health" || true)
+            echo "attempt $i: $code"; [ "$code" = "200" ] && exit 0; sleep 10
+          done
+          echo "::error::Preview API did not become healthy at $URL"; exit 1
+
+      - name: E2E against preview
+        if: steps.swa.outputs.exists == 'true'
+        env:
+          BASE_URL: ${{ steps.deploy.outputs.static_web_app_url }}
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test
+          echo "Preview: $BASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-preview
+          path: playwright-report
+          retention-days: 7
+
+  close-preview:
+    name: Close preview environment
+    if: >-
+      vars.AZURE_ENABLED == 'true' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Get deployment token
+        id: swa
+        run: |
+          name=$(az staticwebapp list -g "${{ vars.AZURE_RG }}" --query "[0].name" -o tsv)
+          [ -z "$name" ] && { echo "exists=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          token=$(az staticwebapp secrets list -n "$name" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          { echo "exists=true"; echo "token=$token"; } >> "$GITHUB_OUTPUT"
+      - uses: Azure/static-web-apps-deploy@v1
+        if: steps.swa.outputs.exists == 'true'
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          action: close
+          app_location: web/dist

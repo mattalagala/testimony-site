@@ -1,0 +1,171 @@
+name: Deploy (dev)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deployments at once, and never cancel one halfway through a migration.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Infra → migrate → deploy → smoke test
+    if: vars.AZURE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      RG: ${{ vars.AZURE_RG }}
+      APP_ENVIRONMENT: dev
+      SQL_ADMIN_GROUP_ID: ${{ vars.SQL_ADMIN_GROUP_ID }}
+      SQL_ADMIN_GROUP_NAME: ${{ vars.SQL_ADMIN_GROUP_NAME }}
+      APP_DB_USER: api_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: Check Azure variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RG: ${{ vars.AZURE_RG }}
+          SQL_ADMIN_GROUP_ID: ${{ vars.SQL_ADMIN_GROUP_ID }}
+          SQL_ADMIN_GROUP_NAME: ${{ vars.SQL_ADMIN_GROUP_NAME }}
+        run: |
+          missing=()
+          for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RG SQL_ADMIN_GROUP_ID SQL_ADMIN_GROUP_NAME; do
+            [ -n "${!v}" ] || missing+=("$v")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing variables in GitHub environment 'dev': ${missing[*]}. Run ./infra/bootstrap.sh dev <subscription>."
+            exit 1
+          fi
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy infrastructure (Bicep)
+        id: infra
+        run: |
+          az deployment group create -g "$RG" -n "testimony-${GITHUB_RUN_ID}" \
+            --template-file infra/main.bicep --parameters infra/dev.bicepparam \
+            --query properties.outputs -o json > outputs.json
+          ai=$(jq -r .appInsightsConnectionString.value outputs.json)
+          echo "::add-mask::$ai"
+          {
+            echo "swa=$(jq -r .staticWebAppName.value outputs.json)"
+            echo "hostname=$(jq -r .staticWebAppHostname.value outputs.json)"
+            echo "sqlServer=$(jq -r .sqlServerName.value outputs.json)"
+            echo "sqlFqdn=$(jq -r .sqlServerFqdn.value outputs.json)"
+            echo "sqlDb=$(jq -r .sqlDatabaseName.value outputs.json)"
+            echo "appInsights=$ai"
+          } >> "$GITHUB_OUTPUT"
+          rm outputs.json
+
+      - name: Open SQL firewall for this runner
+        id: fw
+        run: |
+          ip=$(curl -fsS https://api.ipify.org)
+          az sql server firewall-rule create -g "$RG" -s "${{ steps.infra.outputs.sqlServer }}" \
+            -n "gh-runner-${GITHUB_RUN_ID}" --start-ip-address "$ip" --end-ip-address "$ip" -o none
+          echo "opened=true" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve API database password
+        id: dbpw
+        run: |
+          existing=$(az staticwebapp appsettings list -n "${{ steps.infra.outputs.swa }}" -g "$RG" \
+            --query "properties.SQL_PASSWORD" -o tsv 2>/dev/null || true)
+          if [ -z "$existing" ] || [ "$existing" = "None" ]; then
+            existing="Tq9-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 36)"
+            echo "Generated a new API database password."
+          fi
+          echo "::add-mask::$existing"
+          echo "password=$existing" >> "$GITHUB_OUTPUT"
+
+      - name: Migrate, seed samples, ensure API user
+        env:
+          SQL_SERVER: ${{ steps.infra.outputs.sqlFqdn }}
+          SQL_DATABASE: ${{ steps.infra.outputs.sqlDb }}
+          APP_DB_PASSWORD: ${{ steps.dbpw.outputs.password }}
+        run: |
+          export SQL_ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+          echo "::add-mask::$SQL_ACCESS_TOKEN"
+          npm run migrate -w db
+          # Sample testimonies are dev-only; the script refuses to run against prod.
+          npm run seed:samples -w db
+          npm run ensure-app-user -w db
+
+      - name: Close SQL firewall
+        if: always() && steps.fw.outputs.opened == 'true'
+        run: |
+          az sql server firewall-rule delete -g "$RG" -s "${{ steps.infra.outputs.sqlServer }}" \
+            -n "gh-runner-${GITHUB_RUN_ID}" -o none
+
+      - name: Configure app settings
+        run: |
+          az staticwebapp appsettings set -n "${{ steps.infra.outputs.swa }}" -g "$RG" --output none \
+            --setting-names \
+              "SQL_SERVER=${{ steps.infra.outputs.sqlFqdn }}" \
+              "SQL_DATABASE=${{ steps.infra.outputs.sqlDb }}" \
+              "SQL_USER=$APP_DB_USER" \
+              "SQL_PASSWORD=${{ steps.dbpw.outputs.password }}" \
+              "APPLICATIONINSIGHTS_CONNECTION_STRING=${{ steps.infra.outputs.appInsights }}" \
+              "APP_ENVIRONMENT=$APP_ENVIRONMENT"
+
+      - name: Get deployment token
+        id: token
+        run: |
+          token=$(az staticwebapp secrets list -n "${{ steps.infra.outputs.swa }}" -g "$RG" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy site + API
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.token.outputs.token }}
+          action: upload
+          app_location: web/dist
+          api_location: api/.deploy
+          skip_app_build: true
+          skip_api_build: true
+
+      - name: Wait for API health
+        env:
+          URL: https://${{ steps.infra.outputs.hostname }}
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/health" || true)
+            echo "attempt $i: $code"; [ "$code" = "200" ] && exit 0; sleep 10
+          done
+          echo "::error::API did not become healthy at $URL"; exit 1
+
+      - name: Smoke test
+        env:
+          BASE_URL: https://${{ steps.infra.outputs.hostname }}
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test --grep @smoke --project desktop
+          echo "Deployed: $BASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-smoke
+          path: playwright-report
+          retention-days: 7
