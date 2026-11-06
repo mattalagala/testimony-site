@@ -1,9 +1,19 @@
+# Dependabot checks weekly for newer versions of our dependencies and opens PRs.
+# Each PR runs full CI (no preview environment), so a green PR is safe to merge.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly, day: monday }
     open-pull-requests-limit: 5
+    ignore:
+      # Major versions need a deliberate upgrade, not an automatic PR:
+      # - @types/node must match the Node runtime we deploy on (22).
+      # - TypeScript majors land before lint tooling supports them.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'typescript'
+        update-types: ['version-update:semver-major']
     groups:
       dev-tooling:
         dependency-type: development

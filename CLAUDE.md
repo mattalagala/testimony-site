@@ -19,6 +19,7 @@ Product decisions, scope, and open questions live in the **project brief** (clau
 - Matt is a Microsoft technical consultant (Azure, DevOps, AI tooling). Skip beginner explanations and default to Azure services.
 - Build in small, working increments. Confirm scope before writing a lot of code.
 - Matt approves merges to `main` (each merge deploys), all public-facing content (gospel page, statement of faith), and anything that costs money or can't be undone in Azure.
+- `main` is protected by a ruleset: changes land only through a PR with these checks green: lint/typecheck/unit/build, DB tests, and local e2e. The repo is public, so never commit secrets or real user data.
 
 ## Non-negotiable rules for user content
 
@@ -67,6 +68,9 @@ Run lint, typecheck, unit tests, and build before pushing. CI runs all of the ab
 ## Build increments
 
 1. Foundation: read-only feed, gospel page, infra, CI/CD.
-2. Submission + moderation queue + admin auth (SWA roles) + transactional email (ACS). This includes the manage-link token, stored hashed, and spam layers: honeypot, Turnstile, rate limits, email confirmation, Content Safety, and PII flagging via AI Language (flag only, no auto-redaction).
+2. Submission + moderation queue + admin sign-in + transactional email (ACS), split into GitHub issues:
+   - 2a: testimony submission, manage-link token (stored hashed), confirmation email, honeypot, rate limits.
+   - 2b: moderator sign-in through Entra ID app roles (SWA custom provider) + moderation queue.
+   - 2c: AI screening: Content Safety (crisis content goes to `needs_care`) and PII flagging via AI Language (flag only, no auto-redaction).
 3. Prayer requests + "I'm praying" counter.
-4. Launch hardening: OG tags/sitemap, privacy policy, statement of faith, alerts.
+4. Launch hardening: Turnstile, OG tags/sitemap, privacy policy, statement of faith, alerts.
