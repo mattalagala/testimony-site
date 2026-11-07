@@ -19,6 +19,7 @@ Product decisions, scope, and open questions live in the **project brief** (clau
 - Matt is a Microsoft technical consultant (Azure, DevOps, AI tooling). Skip beginner explanations and default to Azure services.
 - Build in small, working increments. Confirm scope before writing a lot of code.
 - Matt approves merges to `main` (each merge deploys), all public-facing content (gospel page, statement of faith), and anything that costs money or can't be undone in Azure.
+- `main` is protected by a ruleset: changes land only through a PR with these checks green: lint/typecheck/unit/build, DB tests, and local e2e. The repo is public, so never commit secrets or real user data.
 
 ## Non-negotiable rules for user content
 
@@ -26,7 +27,7 @@ Product decisions, scope, and open questions live in the **project brief** (clau
 - **Never expose emails, submitter IDs, manage tokens, or moderation details publicly.** Public shapes live in `shared/src/index.ts`, and a test asserts the exact public fields. Add fields there deliberately.
 - **Display names:** `anonymous` | `first` | `full`, resolved by `resolveDisplayName`. Store only the name as it may be shown.
 - **Render user text as plain text, never HTML.**
-- **Crisis content** (self-harm and similar) goes to `needs_care` status, is never published, and the submitter is shown 988 and crisis resources.
+- **Crisis content** (self-harm and similar) is **flagged privately for the moderator, never revealed to the submitter.** AI never changes a submission's status, and nothing the submitter sees differs because of a flag. Self-harm flags jump to the top of the queue and alert the moderator by email. The moderator decides whether to publish (past-tense stories of rescue are welcome) and can send a caring follow-up email from the queue. Crisis resources (988) appear the same way for **everyone**: on the share form, the thank-you page, and the confirmation email. `needs_care` is a status the moderator sets.
 - **Sample content** is labelled "SAMPLE CONTENT", lives in `shared/src/seed.ts`, and is seeded only in dev, local, and CI. The seeder refuses prod. Never fabricate testimonies for production.
 
 ## Architecture
@@ -67,6 +68,9 @@ Run lint, typecheck, unit tests, and build before pushing. CI runs all of the ab
 ## Build increments
 
 1. Foundation: read-only feed, gospel page, infra, CI/CD.
-2. Submission + moderation queue + admin auth (SWA roles) + transactional email (ACS). This includes the manage-link token, stored hashed, and spam layers: honeypot, Turnstile, rate limits, email confirmation, Content Safety, and PII flagging via AI Language (flag only, no auto-redaction).
+2. Submission + moderation queue + admin sign-in + transactional email (ACS), split into GitHub issues:
+   - 2a: testimony submission with a preview before submitting, manage-link token (stored hashed), confirmation email, honeypot, rate limits.
+   - 2b: moderator sign-in through Entra ID app roles (SWA custom provider) + moderation queue.
+   - 2c: AI screening, flag only: Content Safety (self-harm triggers a private moderator alert, a queue priority, and a follow-up email option) and PII flagging via AI Language (no auto-redaction).
 3. Prayer requests + "I'm praying" counter.
-4. Launch hardening: OG tags/sitemap, privacy policy, statement of faith, alerts.
+4. Launch hardening: Turnstile, OG tags/sitemap, privacy policy, statement of faith, alerts.
