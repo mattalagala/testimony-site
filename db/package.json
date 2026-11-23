@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@testimony/shared": "*",
-    "mssql": "^12.7.14"
+    "mssql": "^12.7.16"
   },
   "devDependencies": {
     "@types/mssql": "^12.3.0",
